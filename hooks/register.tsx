@@ -5,6 +5,8 @@ import { makeColors } from './make-colors.js'
 
 // Position of the sleigh in the band, null between two passes.
 const step = atom({ plugin: 'christmas', key: 'step' } as const, null)
+// Whether snow falls in the band above the prompt.
+const isSnowing = atom({ plugin: 'christmas', key: 'isSnowing' } as const, true)
 
 const FRAME_MS = 90
 const FIRST_PASS_MS = 20_000
@@ -18,6 +20,14 @@ const SLEIGH: Array<[string, number]> = [
 ]
 const SLEIGH_WIDTH = SLEIGH.reduce((sum, [, w]) => sum + w, 0)
 const HO = '  Ho ho ho!'
+
+const SNOW_ROWS = 3
+const SNOW_MS = 150
+const DEFAULT_COLOR = 0x01000000
+// Near flakes are bright and big, far ones dim and small.
+const FLAKE_LOOKS: Array<[number, number]> = [
+  [0x2a, 0xffffff], [0x2022, 0xeaf2ff], [0xb7, 0xc9d8ee], [0x2e, 0x9fb3cf],
+]
 
 const { theme } = makeColors({
   label: 'Christmas',
@@ -89,16 +99,72 @@ const sleighLine = (x: number): string => {
   return ' '.repeat(Math.max(0, x)) + shown.join('')
 }
 
-// A row of drifting snowflakes, the same for a given frame.
-const snowLine = (frame: number, columns: number): string => {
-  let row = ''
+type Flake = { x: number; y: number; speed: number; drift: number; phase: number; look: number }
 
-  for (let col = 0; col < columns; col += 1) {
-    const seed = (col * 7919 + Math.floor(frame / 3) * 104729) % 97
-    row += seed === 0 ? '*' : seed === 1 ? '·' : ' '
+const newFlake = (columns: number, isAnywhere: boolean): Flake => {
+  const look = Math.floor(Math.random() * FLAKE_LOOKS.length)
+
+  return {
+    x: Math.random() * columns,
+    y: isAnywhere ? Math.random() * SNOW_ROWS : -Math.random(),
+    speed: 0.12 - look * 0.02 + Math.random() * 0.05,
+    drift: 0.4 + Math.random() * 0.8,
+    phase: Math.random() * Math.PI * 2,
+    look,
+  }
+}
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+const toBase64 = (bytes: Uint8Array): string => {
+  let out = ''
+
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i] ?? 0
+    const b = bytes[i + 1] ?? 0
+    const c = bytes[i + 2] ?? 0
+    out += BASE64[a >> 2]! + BASE64[((a & 3) << 4) | (b >> 4)]!
+    out += i + 1 < bytes.length ? BASE64[((b & 15) << 2) | (c >> 6)]! : '='
+    out += i + 2 < bytes.length ? BASE64[c & 63]! : '='
   }
 
-  return row
+  return out
+}
+
+// Module-level snow: the flakes, the band they fall in, and its width.
+let flakes: Flake[] = []
+let snowSite: string | null = null
+let snowColumns = 0
+let tick = 0
+
+// Moves every flake one step and packs the band's cells for a Raster.
+const snowFrame = (columns: number): string => {
+  if (columns !== snowColumns) {
+    snowColumns = columns
+    flakes = Array.from({ length: Math.max(4, Math.round(columns / 5)) }, () => newFlake(columns, true))
+  }
+  tick += 1
+  const words = new Uint32Array(columns * SNOW_ROWS * 3)
+
+  for (let cell = 0; cell < columns * SNOW_ROWS; cell += 1) {
+    words.set([0x20, DEFAULT_COLOR, DEFAULT_COLOR], cell * 3)
+  }
+
+  flakes = flakes.map(flake => {
+    const moved = { ...flake, y: flake.y + flake.speed }
+
+    return moved.y >= SNOW_ROWS ? newFlake(columns, false) : moved
+  })
+
+  for (const flake of flakes) {
+    const row = Math.floor(flake.y)
+    const col = Math.round(flake.x + Math.sin(flake.phase + tick * 0.08) * flake.drift)
+    if (row < 0 || col < 0 || col >= columns) continue
+    const [glyph, color] = FLAKE_LOOKS[flake.look]!
+    words.set([glyph, color, DEFAULT_COLOR], (row * columns + col) * 3)
+  }
+
+  return toBase64(new Uint8Array(words.buffer))
 }
 
 const daysToChristmas = (now: number): number => {
@@ -139,6 +205,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await update($, step, () => null)
     await $.command.register({ name: 'christmas', description: "Send Santa's sleigh across right now" })
+    await $.command.register({ name: 'snow', description: 'Turn the falling snow above the prompt on or off' })
 
     const days = daysToChristmas(await $.clock.now())
     $.ui.status(days === 0 ? '🎄 Merry Christmas!' : `🎄 ${days} day${days === 1 ? '' : 's'} to Christmas`)
@@ -150,6 +217,9 @@ export const register: Register = on => {
     }
 
     scheduleNext($, FIRST_PASS_MS)
+    $.clock.every(SNOW_MS, () => {
+      if (snowSite !== null) void $.ui.blit({ requestId: snowSite, key: 'snow', cells: snowFrame(snowColumns) })
+    })
 
     return next(e)
   })
@@ -158,6 +228,13 @@ export const register: Register = on => {
     await pass($)
 
     return { text: '🎅 Ho ho ho! The sleigh is on its way.' }
+  })
+
+  on('command.run', { command: 'snow' }, async $ => {
+    const isOn = !(await read($, isSnowing))
+    await update($, isSnowing, () => isOn)
+
+    return { text: isOn ? '❄️ Let it snow!' : 'Snow stopped.' }
   })
 
   on('ui.render', { component: 'Backdrop' }, ($, e, next) => {
@@ -170,21 +247,39 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const current = await read($, step)
-    if (current === null || e.props.hasSurvey) return next(e)
+    const hasSnow = e.surface === 'terminal' && (await read($, isSnowing))
+    snowSite = null
+    if ((current === null && !hasSnow) || e.props.hasSurvey || e.props.isCollapsed) return next(e)
 
     columns = e.props.bodyColumns
-    const x = current - SLEIGH_WIDTH
+    const x = current === null ? 0 : current - SLEIGH_WIDTH
     const isMidway = x > columns / 3 && x < (columns * 2) / 3
-    const { Box, Text } = $.ui.resolve(e)
+
+    if (e.surface === 'terminal') {
+      const { Box, Raster, Text } = $.ui.resolve(e)
+      const width = Math.min(512, Math.max(1, columns))
+      if (hasSnow) snowSite = e.requestId
+
+      return (
+        <Box flexDirection="column">
+          {hasSnow ? <Raster key="snow" columns={width} rows={SNOW_ROWS} cells={snowFrame(width)} /> : null}
+          {current === null ? null : (
+            <Text wrap="truncate-end">
+              <Text color="yellow">{sleighLine(x)}</Text>
+              {isMidway ? <Text color="red" bold>{HO}</Text> : ''}
+            </Text>
+          )}
+        </Box>
+      )
+    }
+
+    const { Text } = $.ui.resolve(e)
 
     return (
-      <Box flexDirection="column">
-        <Text color="white" dimColor wrap="truncate-end">{snowLine(current, columns)}</Text>
-        <Text wrap="truncate-end">
-          <Text color="yellow">{sleighLine(x)}</Text>
-          {isMidway ? <Text color="red" bold>{HO}</Text> : ''}
-        </Text>
-      </Box>
+      <Text wrap="truncate-end">
+        <Text color="yellow">{sleighLine(x)}</Text>
+        {isMidway ? <Text color="red" bold>{HO}</Text> : ''}
+      </Text>
     )
   })
 }
