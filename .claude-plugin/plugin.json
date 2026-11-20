@@ -1,0 +1,1 @@
+{ "name": "christmas", "version": "0.1.0", "description": "Christmas mode: Santa's sleigh crosses the prompt band now and then, a countdown to Christmas and a winter theme", "types": "./types/index.d.ts" }

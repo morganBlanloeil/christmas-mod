@@ -1,0 +1,5 @@
+{
+  "name": "christmas-mod",
+  "owner": { "name": "morganBlanloeil" },
+  "plugins": [{ "name": "christmas", "source": "./" }]
+}
