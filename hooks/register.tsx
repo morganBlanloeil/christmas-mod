@@ -169,10 +169,12 @@ const snowFrame = (columns: number): string => {
 
 const daysToChristmas = (now: number): number => {
   const today = new Date(now)
-  let christmas = new Date(today.getFullYear(), 11, 25)
-  if (today > christmas && today.getDate() !== 25) christmas = new Date(today.getFullYear() + 1, 11, 25)
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+  let christmasUtc = Date.UTC(today.getFullYear(), 11, 25)
+  if (todayUtc > christmasUtc) christmasUtc = Date.UTC(today.getFullYear() + 1, 11, 25)
 
-  return Math.ceil((christmas.getTime() - new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()) / 86_400_000)
+  // UTC midnights: immune to DST shifts
+  return Math.round((christmasUtc - todayUtc) / 86_400_000)
 }
 
 // Module-level: the band width last drawn and the running animation timer.
